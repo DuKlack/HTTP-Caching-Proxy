@@ -3,7 +3,6 @@
 
 #define MEMORYSIZE 1048576  // Example: 1 MB memory limit (adjust as needed)
 
-#include <unordered_map>
 #include <ctime>
 #include <queue>
 #include <vector>
@@ -86,13 +85,14 @@ public:
 
     uint64_t access_count = 0; // Hit counter      
 
-    bool add_header(std::vector<HeaderEntry> newHeader);
+    void add_header(std::vector<HeaderEntry> newHeader);
     void remove_header(std::string key);
     bool Handle_Singleton_Header_conflict(const std::vector<HeaderEntry> newHeader);
     bool Handle_Mutually_Exclusive_Headers(const std::vector<HeaderEntry> newHeader);
-    void update_body(std::vector<std::string> newbody);
+    void update_body(std::vector<char>newbody);
     rapidjson::Value ToJson(rapidjson::Document::AllocatorType& allocator) const;
     bool FromJson(const rapidjson::Value& obj); // Added missing semicolon here
+    void update_TTL();
 };
 
 #endif 

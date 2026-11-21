@@ -1,271 +1,287 @@
+/*
+ * sniffex.c - Modified for safe compilation and port 80 capture
+ */
 
-#include <iostream>
-#include <string>
-#include <cstdint>
-#include <ctime>
+#define APP_NAME        "sniffex"
+#define APP_DESC        "Sniffer example using libpcap"
+#define APP_COPYRIGHT   "Copyright (c) 2005 The Tcpdump Group"
+#define APP_DISCLAIMER  "THERE IS ABSOLUTELY NO WARRANTY FOR THIS PROGRAM."
+
 #include <pcap.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
-#define CAPTURE_DURATION 1
-#define SNAP_LEN 65535
-#define CAPTURE_TIMEOUT 1000
+#define SNAP_LEN 1518
+#define SIZE_ETHERNET 14
+#define ETHER_ADDR_LEN  6
 
-using namespace std;
+struct sniff_ethernet {
+        u_char  ether_dhost[ETHER_ADDR_LEN];    
+        u_char  ether_shost[ETHER_ADDR_LEN];    
+        u_short ether_type;                     
+};
 
-/* Read a 16-bit big-endian value safely */
-uint16_t read_be16(const u_char* p)
+struct sniff_ip {
+        u_char  ip_vhl;                         
+        u_char  ip_tos;                         
+        u_short ip_len;                         
+        u_short ip_id;                          
+        u_short ip_off;                         
+        #define IP_RF 0x8000                    
+        #define IP_DF 0x4000                    
+        #define IP_MF 0x2000                    
+        #define IP_OFFMASK 0x1fff               
+        u_char  ip_ttl;                         
+        u_char  ip_p;                           
+        u_short ip_sum;                         
+        struct  in_addr ip_src, ip_dst;         
+};
+#define IP_HL(ip)               (((ip)->ip_vhl) & 0x0f)
+#define IP_V(ip)                (((ip)->ip_vhl) >> 4)
+
+typedef u_int tcp_seq;
+
+struct sniff_tcp {
+        u_short th_sport;                       
+        u_short th_dport;                       
+        tcp_seq th_seq;                         
+        tcp_seq th_ack;                         
+        u_char  th_offx2;                       
+#define TH_OFF(th)      (((th)->th_offx2 & 0xf0) >> 4)
+        u_char  th_flags;
+        #define TH_FIN  0x01
+        #define TH_SYN  0x02
+        #define TH_RST  0x04
+        #define TH_PUSH 0x08
+        #define TH_ACK  0x10
+        #define TH_URG  0x20
+        #define TH_ECE  0x40
+        #define TH_CWR  0x80
+        #define TH_FLAGS        (TH_FIN|TH_SYN|TH_RST|TH_ACK|TH_URG|TH_ECE|TH_CWR)
+        u_short th_win;                         
+        u_short th_sum;                         
+        u_short th_urp;                         
+};
+
+void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet);
+void print_payload(const u_char *payload, int len);
+void print_hex_ascii_line(const u_char *payload, int len, int offset);
+void print_app_banner(void);
+void print_app_usage(void);
+
+void print_app_banner(void)
 {
-    return (static_cast<uint16_t>(p[0]) << 8) |
-            static_cast<uint16_t>(p[1]);
+    printf("%s - %s\n", APP_NAME, APP_DESC);
+    printf("%s\n", APP_COPYRIGHT);
+    printf("%s\n", APP_DISCLAIMER);
+    printf("\n");
 }
 
-/* Process and parse captured packets */
-void process_packet(
-    const struct pcap_pkthdr* header,
-    const u_char* packet,
-    int& packet_count)
+void print_app_usage(void)
 {
-    size_t len = header->caplen;
-    size_t offset = 14;
+    printf("Usage: %s [interface]\n\n", APP_NAME);
+    printf("Options:\n");
+    printf("    interface    Listen on <interface> for packets.\n\n");
+}
 
-    // Check minimum Ethernet header length
-    if (len < 14)
+void print_hex_ascii_line(const u_char *payload, int len, int offset)
+{
+    int i, gap;
+    const u_char *ch;
+
+    printf("%05d   ", offset);
+    ch = payload;
+    for(i = 0; i < len; i++) {
+        printf("%02x ", *ch);
+        ch++;
+        if (i == 7) printf(" ");
+    }
+    if (len < 8) printf(" ");
+    if (len < 16) {
+        gap = 16 - len;
+        for (i = 0; i < gap; i++) printf("   ");
+    }
+    printf("   ");
+
+    ch = payload;
+    for(i = 0; i < len; i++) {
+        if (isprint(*ch)) printf("%c", *ch);
+        else printf(".");
+        ch++;
+    }
+    printf("\n");
+}
+
+void print_payload(const u_char *payload, int len)
+{
+    int len_rem = len;
+    int line_width = 16;
+    int line_len;
+    int offset = 0;
+    const u_char *ch = payload;
+
+    if (len <= 0) return;
+
+    if (len <= line_width) {
+        print_hex_ascii_line(ch, len, offset);
         return;
-
-    uint16_t ether_type = read_be16(packet + 12);
-
-    // Handle VLAN-tagged Ethernet frames
-    while (ether_type == 0x8100 ||
-           ether_type == 0x88A8 ||
-           ether_type == 0x9100)
-    {
-        if (len < offset + 4)
-            return;
-
-        ether_type = read_be16(packet + offset + 2);
-        offset += 4;
     }
 
-    // Only process IPv4 packets
-    if (ether_type != 0x0800)
-        return;
-
-    // Check minimum IPv4 header length
-    if (len < offset + 20)
-        return;
-
-    const u_char* ip = packet + offset;
-
-    // Verify IPv4 version
-    if ((ip[0] >> 4) != 4)
-        return;
-
-    // Calculate IP header length
-    size_t ip_header_len = (ip[0] & 0x0F) * 4;
-
-    if (ip_header_len < 20 ||
-        len < offset + ip_header_len)
-        return;
-
-    // Verify TCP protocol
-    if (ip[9] != 6)
-        return;
-
-    // Validate IPv4 total length
-    uint16_t ip_total_len = read_be16(ip + 2);
-
-    if (ip_total_len < ip_header_len + 20)
-        return;
-
-    if (len < offset + ip_total_len)
-        return;
-
-    // Ignore non-initial IPv4 fragments
-    uint16_t fragment = read_be16(ip + 6);
-
-    if ((fragment & 0x1FFF) != 0)
-        return;
-
-    // Locate TCP header
-    const u_char* tcp = ip + ip_header_len;
-
-    // Calculate TCP header length
-    size_t tcp_header_len = (tcp[12] >> 4) * 4;
-
-    if (tcp_header_len < 20 ||
-        tcp_header_len > ip_total_len - ip_header_len)
-        return;
-
-    // Extract TCP ports
-    uint16_t sport = read_be16(tcp);
-    uint16_t dport = read_be16(tcp + 2);
-
-    cout << "Captured packet #" << ++packet_count
-         << " | Source Port: " << sport
-         << " -> Destination Port: " << dport
-         << endl;
+    for ( ;; ) {
+        line_len = line_width % len_rem;
+        print_hex_ascii_line(ch, line_len, offset);
+        len_rem = len_rem - line_len;
+        ch = ch + line_len;
+        offset = offset + line_width;
+        if (len_rem <= line_width) {
+            print_hex_ascii_line(ch, len_rem, offset);
+            break;
+        }
+    }
 }
 
-int main()
+void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 {
+    static int count = 1;
+    const struct sniff_ip *ip;
+    const struct sniff_tcp *tcp;
+    const char *payload;
+
+    int size_ip;
+    int size_tcp;
+    int size_payload;
+
+    printf("\nPacket number %d:\n", count++);
+
+    ip = (struct sniff_ip*)(packet + SIZE_ETHERNET);
+    size_ip = IP_HL(ip)*4;
+    if (size_ip < 20) {
+        printf("   * Invalid IP header length: %u bytes\n", size_ip);
+        return;
+    }
+
+    printf("      From: %s\n", inet_ntoa(ip->ip_src));
+    printf("        To: %s\n", inet_ntoa(ip->ip_dst));
+
+    if (ip->ip_p != IPPROTO_TCP) {
+        printf("   Protocol: non-TCP\n");
+        return;
+    }
+
+    tcp = (struct sniff_tcp*)(packet + SIZE_ETHERNET + size_ip);
+    size_tcp = TH_OFF(tcp)*4;
+    if (size_tcp < 20) {
+        printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
+        return;
+    }
+
+    printf("   Src port: %d\n", ntohs(tcp->th_sport));
+    printf("   Dst port: %d\n", ntohs(tcp->th_dport));
+
+    payload = (const char *)(packet + SIZE_ETHERNET + size_ip + size_tcp);
+    size_payload = ntohs(ip->ip_len) - (size_ip + size_tcp);
+
+    if (size_payload > 0) {
+        printf("   Payload (%d bytes):\n", size_payload);
+        print_payload((const u_char*)payload, size_payload);
+    }
+}
+
+int main(int argc, char **argv)
+{
+    char *dev = NULL;
     char errbuf[PCAP_ERRBUF_SIZE];
-
-    pcap_t* handle = nullptr;
-    pcap_if_t* alldevs = nullptr;
-
+    pcap_t *handle;
+    char filter_exp[] = "ip and tcp port 80";
     struct bpf_program fp;
+    bpf_u_int32 mask, net;
+    int num_packets = 10;
+    pcap_if_t *alldevs = NULL;
 
-    bool filter_compiled = false;
+    print_app_banner();
 
-    int packet_count = 0;
+    if (argc == 2) {
+        dev = argv[1];
+    } else if (argc > 2) {
+        fprintf(stderr, "error: unrecognized command-line options\n\n");
+        print_app_usage();
+        exit(EXIT_FAILURE);
+    } else {
+        // Safe modern device discovery automatically skipping loopback
+        if (pcap_findalldevs(&alldevs, errbuf) == -1) {
+            fprintf(stderr, "Error finding devices: %s\n", errbuf);
+            exit(EXIT_FAILURE);
+        }
 
-    bpf_u_int32 net = 0;
-    bpf_u_int32 mask = PCAP_NETMASK_UNKNOWN;
+        pcap_if_t *curr = alldevs;
+        while (curr != NULL) {
+            // Filter out interfaces flagged as loopback or containing loopback/lo names
+            if (!(curr->flags & PCAP_IF_LOOPBACK) && 
+                strstr(curr->name, "lo") == NULL && 
+                strstr(curr->name, "loopback") == NULL) {
+                dev = strdup(curr->name);
+                break;
+            }
+            curr = curr->next;
+        }
 
-    const char filter[] = "tcp port 80";
+        // Fallback to the first device if all are loopback
+        if (dev == NULL && alldevs != NULL) {
+            dev = strdup(alldevs->name);
+            fprintf(stderr, "Warning: No non-loopback device found, falling back to: %s\n", dev);
+        }
 
-    // 1. Find available network interfaces
-    if (pcap_findalldevs(&alldevs, errbuf) == -1)
-    {
-        cerr << "Device discovery error: "
-             << errbuf << endl;
-        return 2;
-    }
-
-    if (alldevs == nullptr)
-    {
-        cerr << "No network interfaces found." << endl;
-        return 2;
-    }
-
-    // 2. Select the first available interface
-    if (alldevs->name == nullptr)
-    {
-        cerr << "Invalid network interface." << endl;
         pcap_freealldevs(alldevs);
-        return 2;
-    }
 
-    // Copy device name into a C++ string
-    string dev = alldevs->name;
-
-    // 3. Look up network and mask
-    if (pcap_lookupnet(
-            dev.c_str(), &net, &mask, errbuf) == -1)
-    {
-        cerr << "Network lookup warning: "
-             << errbuf << endl;
-
-        mask = PCAP_NETMASK_UNKNOWN;
-    }
-
-    // 4. Open packet capture session
-    handle = pcap_open_live(
-        dev.c_str(),
-        SNAP_LEN,
-        1,
-        CAPTURE_TIMEOUT,
-        errbuf
-    );
-
-    pcap_freealldevs(alldevs);
-    alldevs = nullptr;
-
-    if (handle == nullptr)
-    {
-        cerr << "Couldn't open device "
-             << dev << ": " << errbuf << endl;
-        return 2;
-    }
-
-    cout << "Device: " << dev << endl;
-    cout << "Listening for TCP port 80 traffic for "
-         << CAPTURE_DURATION << " seconds..." << endl;
-
-    // 5. Check Ethernet data-link type
-    if (pcap_datalink(handle) != DLT_EN10MB)
-    {
-        cerr << "Unsupported data-link type. "
-             << "Ethernet required." << endl;
-
-        pcap_close(handle);
-        return 2;
-    }
-
-    // 6. Compile BPF filter
-    if (pcap_compile(
-            handle, &fp, filter, 1, mask) == -1)
-    {
-        cerr << "Filter compilation error: "
-             << pcap_geterr(handle) << endl;
-
-        pcap_close(handle);
-        return 2;
-    }
-
-    filter_compiled = true;
-
-    // 7. Install BPF filter
-    if (pcap_setfilter(handle, &fp) == -1)
-    {
-        cerr << "Filter installation error: "
-             << pcap_geterr(handle) << endl;
-
-        pcap_freecode(&fp);
-        pcap_close(handle);
-        return 2;
-    }
-
-    // 8. Capture packets for 10 seconds
-    time_t start_time = time(nullptr);
-
-    while (difftime(time(nullptr), start_time)
-           < CAPTURE_DURATION)
-    {
-        struct pcap_pkthdr* header = nullptr;
-        const u_char* packet = nullptr;
-
-        int result = pcap_next_ex(
-            handle, &header, &packet
-        );
-
-        if (result == 0)
-        {
-            // Timeout: check timer again
-            continue;
-        }
-
-        if (result == -1)
-        {
-            cerr << "Capture error: "
-                 << pcap_geterr(handle) << endl;
-            break;
-        }
-
-        if (result == -2)
-        {
-            // Capture stopped
-            break;
-        }
-
-        if (result == 1)
-        {
-            process_packet(
-                header,
-                packet,
-                packet_count
-            );
+        if (dev == NULL) {
+            fprintf(stderr, "Couldn't find any network interfaces.\n");
+            exit(EXIT_FAILURE);
         }
     }
 
-    // 9. Clean up
-    if (filter_compiled)
-        pcap_freecode(&fp);
+    if (pcap_lookupnet(dev, &net, &mask, errbuf) == -1) {
+        fprintf(stderr, "Couldn't get netmask for device %s: %s\n", dev, errbuf);
+        net = 0;
+        mask = 0;
+    }
 
+    printf("Device: %s\n", dev);
+    printf("Number of packets: %d\n", num_packets);
+    printf("Filter expression: %s\n", filter_exp);
+
+    handle = pcap_open_live(dev, SNAP_LEN, 1, 1000, errbuf);
+    if (handle == NULL) {
+        fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
+        exit(EXIT_FAILURE);
+    }
+
+    if (pcap_datalink(handle) != DLT_EN10MB) {
+        fprintf(stderr, "%s is not an Ethernet\n", dev);
+        exit(EXIT_FAILURE);
+    }
+
+    if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
+        fprintf(stderr, "Couldn't parse filter %s: %s\n", filter_exp, pcap_geterr(handle));
+        exit(EXIT_FAILURE);
+    }
+
+    if (pcap_setfilter(handle, &fp) == -1) {
+        fprintf(stderr, "Couldn't install filter %s: %s\n", filter_exp, pcap_geterr(handle));
+        exit(EXIT_FAILURE);
+    }
+
+    pcap_loop(handle, num_packets, got_packet, NULL);
+
+    pcap_freecode(&fp);
     pcap_close(handle);
 
-    cout << "\nCapture finished." << endl;
-    cout << "Total TCP packets captured: "
-         << packet_count << endl;
-
+    printf("\nCapture complete.\n");
     return 0;
 }

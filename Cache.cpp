@@ -1,79 +1,134 @@
-#include <iostream>
-#include <string>
-#include <unordered_map>
-#include <ctime>
-#include<vector>
-#include <optional>
-#include <fstream>
-#include <cstdint> 
-#include<pthread.h>
-#include<string>
 #include <algorithm>
-#include "HTTP_cache.hpp"
+#include <chrono>
+#include <cstdint>
+#include <fstream>
+#include <iostream>
+#include <mutex>
+#include <optional>
+#include <string>
 #include <rapidjson/document.h>
-#include <rapidjson/istreamwrapper.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+#include "HTTP_cache.hpp"
 #include "Cache.hpp"
 
+std::optional<HTTP_cache> Cache::Find_in_Log(uint32_t target_ip, const std::string& Host) {
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex);
 
-std::optional<HTTP_cache> Cache::Find_in_Log(uint32_t target_ip, std::string target_host){
-    std::fstream storage("Cache.json");
-    if (!storage.is_open()) {
-        std::cerr << "Failed to open file!" << std::endl;
+    std::ifstream log_file(LOG_DESTINATION);
+    if (!log_file.is_open()) {
         return std::nullopt;
     }
-    rapidjson::IStreamWrapper isw(storage);
-    rapidjson::Document doc;
 
-    doc.ParseStream(isw);
-    storage.close();
-    if (doc.HasParseError()) {
-        std::cerr << "JSON parse error!" << std::endl;
-        return std::nullopt;
-    }
-    auto matches_target = [target_ip, &target_host](const rapidjson::Value& obj) {
-        if (!obj.IsObject() || !obj.HasMember("IP_address")) return false;
-        
-        const auto& ip_addr = obj["IP_address"];
-        if (!ip_addr.IsObject()) return false;
+    std::string line;
+    while (std::getline(log_file, line)) {
+        if (line.empty()) continue;
 
-        // Check IP
-        if (!ip_addr.HasMember("IP") || ip_addr["IP"].GetUint() != target_ip) {
-            return false;
+        rapidjson::Document doc;
+        doc.Parse(line.c_str());
+
+        if (doc.HasParseError() || !doc.IsObject()) {
+            continue;
         }
 
-        // Check Host
-        if (ip_addr.HasMember("Host") && ip_addr["Host"].IsObject()) {
-            const auto& hostObj = ip_addr["Host"];
-            if (hostObj.HasMember("Host") && hostObj["Host"].IsString()) {
-                std::string fileHost = hostObj["Host"].GetString();
-                if (fileHost == target_host) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
-
-    // 3. Search handling (supports both an Array of cache objects or a Single cache object)
-    if (doc.IsArray()) {
-        for (rapidjson::SizeType i = 0; i < doc.Size(); ++i) {
-            if (matches_target(doc[i])) {
-                HTTP_cache cache;
-                if (cache.FromJson(doc[i])) {
-                    return cache;
-                }
-            }
-        }
-    } else if (doc.IsObject()) {
-        if (matches_target(doc)) {
-            HTTP_cache cache;
-            if (cache.FromJson(doc)) {
-                return cache;
+        HTTP_cache cached_item;
+        if (cached_item.FromJson(doc)) {
+            if (cached_item.IPv4 == target_ip && cached_item.host == Host) {
+                return cached_item;
             }
         }
     }
 
-    return std::nullopt; // Not found
+    return std::nullopt;
 }
 
+void Cache::write_to_log(const HTTP_cache& cache) {
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex);
 
+    rapidjson::Document doc;
+    rapidjson::Value val = cache.ToJson(doc.GetAllocator());
+
+    rapidjson::StringBuffer sb;
+    rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
+    val.Accept(writer);
+
+    std::ofstream log_file(LOG_DESTINATION, std::ios::app);
+    if (log_file.is_open()) {
+        log_file << sb.GetString() << '\n';
+    }
+}
+
+std::optional<HTTP_cache> Cache::Find_in_Queue(uint32_t target_ip, const std::string& Host) {
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex);
+
+    auto it = buffer.find(CacheKey{target_ip, Host});
+    if (it == buffer.end()) {
+        return std::nullopt;
+    }
+
+    std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    if (it->second.Expiration_Time > 0 && it->second.Expiration_Time < now) {
+        buffer.erase(it);
+        return std::nullopt;
+    }
+
+    it->second.access_count++;
+    it->second.last_accessed = now;
+    return it->second;
+}
+
+std::optional<HTTP_cache> Cache::TTL_Check() {
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex);
+
+    HTTP_cache* expired = TTL_Check_Internal();
+    if (expired == nullptr) {
+        return std::nullopt;
+    }
+
+    HTTP_cache expired_copy = *expired;
+    buffer.erase(CacheKey{expired_copy.IPv4, expired_copy.host});
+    return expired_copy;
+}
+
+void Cache::remove_from_queue(const HTTP_cache& cache) {
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex);
+    buffer.erase(CacheKey{cache.IPv4, cache.host});
+}
+
+void Cache::add_to_queue(const HTTP_cache& cache) {
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex);
+
+    CacheKey key{cache.IPv4, cache.host};
+    auto existing = buffer.find(key);
+    if (existing != buffer.end()) {
+        existing->second = cache;
+        return;
+    }
+
+    if (buffer.size() >= BUFFER_SIZE) {
+        // Prefer evicting an expired entry before evicting the least-used live entry.
+        HTTP_cache* evict_target = TTL_Check_Internal();
+        if (evict_target == nullptr) {
+            evict_target = Find_min();
+        }
+        if (evict_target != nullptr) {
+            buffer.erase(CacheKey{evict_target->IPv4, evict_target->host});
+        }
+    }
+
+    buffer.emplace(std::move(key), cache);
+}
+
+bool Cache::update_cache(const HTTP_cache& cache) {
+    std::lock_guard<std::recursive_mutex> lock(cache_mutex);
+
+    auto it = buffer.find(CacheKey{cache.IPv4, cache.host});
+    if (it == buffer.end()) {
+        return false;
+    }
+
+    it->second.add_header(cache.header);
+    it->second.update_body(cache.body);
+    it->second.update_TTL();
+    return true;
+}
