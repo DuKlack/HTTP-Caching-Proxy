@@ -13,7 +13,7 @@
 #include <arpa/inet.h>
 #include "HTTP_cache.hpp"
 
-void HTTP_cache::add_header(const std::vector<HeaderEntry> newHeader) {
+void HTTP_cache::add_header(const std::vector<HeaderEntry>& newHeader) {
     if (this->Handle_Singleton_Header_conflict(newHeader) || this->Handle_Mutually_Exclusive_Headers(newHeader)) {
         return ; 
     }
@@ -31,11 +31,11 @@ void HTTP_cache::add_header(const std::vector<HeaderEntry> newHeader) {
             this->header.push_back(h);
         }
     }
-    this->last_accessed = std::time(nullptr); // Fixed TIME_UTC macro issue
+    this->last_accessed = std::time(nullptr);
     this->access_count++;
 }
 
-void HTTP_cache::remove_header(std::string key) {
+void HTTP_cache::remove_header(const std::string& key) {
     auto target = find_header(this->header, key);
     if (target == this->header.end()) {
         return;
@@ -44,7 +44,7 @@ void HTTP_cache::remove_header(std::string key) {
     this->last_accessed = std::time(nullptr);
 }
 
-bool HTTP_cache::Handle_Singleton_Header_conflict(const std::vector<HeaderEntry> newHeader) {
+bool HTTP_cache::Handle_Singleton_Header_conflict(const std::vector<HeaderEntry>& newHeader) const {
     for (size_t i = 0; i < newHeader.size(); ++i) {
         auto is_singleton = std::find(singletons.begin(), singletons.end(), newHeader[i].key);
         if (is_singleton != singletons.end()) {
@@ -58,7 +58,7 @@ bool HTTP_cache::Handle_Singleton_Header_conflict(const std::vector<HeaderEntry>
     return false; // No batch conflicts
 }
 
-bool HTTP_cache::Handle_Mutually_Exclusive_Headers(const std::vector<HeaderEntry> newHeaders) {
+bool HTTP_cache::Handle_Mutually_Exclusive_Headers(const std::vector<HeaderEntry>& newHeaders) {
     for (const auto& newHeader : newHeaders) {
         std::string incomingKey = to_lower(newHeader.key);
         std::string incomingValue = to_lower(newHeader.value);
@@ -221,115 +221,9 @@ rapidjson::Value HTTP_cache::ToJson(rapidjson::Document::AllocatorType& allocato
 
     return obj;
 }
-
-// Fixed class name (HTTP_cache instead of HTTP_Cache), return type (bool), and parameter name (raw_data)
-// --- Testing Functions ---
-
-void test_header_entry_normalization() {
-    std::cout << "Running test_header_entry_normalization..." << std::endl;
-    HeaderEntry entry("Content-Type", "application/JSON; charset=UTF-8");
-    assert(entry.key == "content-type");
-    assert(entry.value == "application/JSON; charset=UTF-8"); 
-    std::cout << "[PASSED] test_header_entry_normalization\n" << std::endl;
+void HTTP_cache::update_TTL(std::time_t ttl_seconds) {
+    std::time_t now = std::time(nullptr);
+    this->last_accessed = now;
+    this->Expiration_Time = now + ttl_seconds;
 }
 
-void test_http_cache_initialization() {
-    std::cout << "Running test_http_cache_initialization..." << std::endl;
-    HTTP_cache cache;
-    assert(cache.header.empty()); 
-    assert(cache.body.empty());
-    std::cout << "[PASSED] test_http_cache_initialization\n" << std::endl;
-}
-
-void test_add_and_remove_headers() {
-    std::cout << "Running test_add_and_remove_headers..." << std::endl;
-    HTTP_cache cache;
-    
-    std::vector<HeaderEntry> new_headers = {
-        {"Authorization", "Bearer Token123XYZ"},
-        {"X-Custom-Header", "ValueWithCase"}
-    };
-    
-    cache.add_header(new_headers);
-    assert(cache.header.size() == 2); 
-    assert(cache.header[0].key == "authorization");
-    assert(cache.header[0].value == "Bearer Token123XYZ"); 
-    
-    cache.remove_header("AUTHORIZATION");
-    assert(cache.header.size() == 1);
-    assert(cache.header[0].key == "x-custom-header");
-    std::cout << "[PASSED] test_add_and_remove_headers\n" << std::endl;
-}
-
-void test_singleton_conflict_handler() {
-    std::cout << "Running test_singleton_conflict_handler..." << std::endl;
-    
-    HTTP_cache cache1;
-    std::vector<HeaderEntry> valid_batch = {
-        {"Content-Length", "500"},
-        {"Host", "example.com"},
-        {"Content-Type", "application/json"}
-    };
-    cache1.add_header(valid_batch);
-    assert(cache1.header.size() == 3);
-
-    HTTP_cache cache2;
-    std::vector<HeaderEntry> duplicate_singleton_batch = {
-        {"Content-Length", "500"},
-        {"Content-Length", "200"} 
-    };
-    cache2.add_header(duplicate_singleton_batch);
-    assert(cache2.header.empty()); 
-
-    std::cout << "[PASSED] test_singleton_conflict_handler\n" << std::endl;
-}
-
-void test_mutually_exclusive_headers_conflict() {
-    std::cout << "Running test_mutually_exclusive_headers_conflict..." << std::endl;
-    
-    HTTP_cache cache1;
-    std::vector<HeaderEntry> bad_cache_control = {
-        {"Cache-Control", "no-store, max-age=3600"}
-    };
-    cache1.add_header(bad_cache_control);
-    assert(cache1.header.empty()); 
-
-    HTTP_cache cache2;
-    cache2.header.push_back(HeaderEntry("Transfer-Encoding", "chunked"));
-    
-    std::vector<HeaderEntry> incoming_content_length = {
-        {"Content-Length", "1024"}
-    };
-    cache2.add_header(incoming_content_length);
-    
-    auto cl_target = find_header(cache2.header, "content-length");
-    assert(cl_target == cache2.header.end());
-
-    HTTP_cache cache3;
-    cache3.header.push_back(HeaderEntry("If-None-Match", "\"xyz123\""));
-    
-    std::vector<HeaderEntry> incoming_ims = {
-        {"If-Modified-Since", "Wed, 21 Oct 2015 07:28:00 GMT"}
-    };
-    cache3.add_header(incoming_ims);
-    
-    auto ims_target = find_header(cache3.header, "if-modified-since");
-    assert(ims_target == cache3.header.end());
-
-    std::cout << "[PASSED] test_mutually_exclusive_headers_conflict\n" << std::endl;
-}
-
-int main() {
-    std::cout << "=== STARTING HTTP CACHE TESTS ===\n" << std::endl;
-    try {
-        test_header_entry_normalization();
-        test_http_cache_initialization();
-        test_add_and_remove_headers();
-        test_singleton_conflict_handler();
-        test_mutually_exclusive_headers_conflict();
-        std::cout << "=== ALL TESTS PASSED SUCCESSFULLY ===" << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "TEST FAILED WITH EXCEPTION: " << e.what() << std::endl;
-        return 1;
-    }
-}

@@ -1,7 +1,7 @@
 #ifndef CACHE_HPP
 #define CACHE_HPP
 
-#define LOG_DESTINATION "Cache.log"
+#define LOG_DESTINATION "Cache.json"
 #define BUFFER_SIZE 5
 
 #include <chrono>
@@ -47,7 +47,6 @@ public:
 private:
     std::recursive_mutex cache_mutex;
 
-    // Caller must hold cache_mutex.
     HTTP_cache* TTL_Check_Internal() {
         std::time_t current_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 
@@ -59,7 +58,7 @@ private:
         return nullptr;
     }
 
-    // Caller must hold cache_mutex.
+    
     HTTP_cache* Find_min() {
         HTTP_cache* min_item = nullptr;
         uint64_t min_access = UINT64_MAX;

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -12,6 +13,59 @@
 #include "HTTP_cache.hpp"
 #include "Cache.hpp"
 
+
+std::vector<HTTP_cache> load_all_from_log() {
+    std::vector<HTTP_cache> entries;
+    std::ifstream log_file(LOG_DESTINATION);
+    if (!log_file.is_open()) {
+        return entries;
+    }
+
+    std::ostringstream ss;
+    ss << log_file.rdbuf();
+    std::string content = ss.str();
+    if (content.empty()) {
+        return entries;
+    }
+
+    rapidjson::Document doc;
+    doc.Parse(content.c_str());
+    if (!doc.HasParseError()) {
+        if (doc.IsObject()) {
+            HTTP_cache item;
+            if (item.FromJson(doc)) {
+                entries.push_back(std::move(item));
+            }
+            return entries;
+        }
+        if (doc.IsArray()) {
+            for (rapidjson::SizeType i = 0; i < doc.Size(); ++i) {
+                HTTP_cache item;
+                if (item.FromJson(doc[i])) {
+                    entries.push_back(std::move(item));
+                }
+            }
+            return entries;
+        }
+    }
+
+    // Fallback: line-delimited JSON (NDJSON)
+    std::istringstream lines(content);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.empty()) continue;
+        rapidjson::Document line_doc;
+        line_doc.Parse(line.c_str());
+        if (!line_doc.HasParseError() && line_doc.IsObject()) {
+            HTTP_cache item;
+            if (item.FromJson(line_doc)) {
+                entries.push_back(std::move(item));
+            }
+        }
+    }
+    return entries;
+}
+
 std::optional<HTTP_cache> Cache::Find_in_Log(uint32_t target_ip, const std::string& Host) {
     std::lock_guard<std::recursive_mutex> lock(cache_mutex);
 
@@ -20,6 +74,8 @@ std::optional<HTTP_cache> Cache::Find_in_Log(uint32_t target_ip, const std::stri
         return std::nullopt;
     }
 
+    std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::optional<HTTP_cache> latest_match;
     std::string line;
     while (std::getline(log_file, line)) {
         if (line.empty()) continue;
@@ -34,12 +90,16 @@ std::optional<HTTP_cache> Cache::Find_in_Log(uint32_t target_ip, const std::stri
         HTTP_cache cached_item;
         if (cached_item.FromJson(doc)) {
             if (cached_item.IPv4 == target_ip && cached_item.host == Host) {
-                return cached_item;
+                if (cached_item.Expiration_Time == 0 || cached_item.Expiration_Time >= now) {
+                    latest_match = std::move(cached_item);
+                } else {
+                    latest_match.reset();
+                }
             }
         }
     }
 
-    return std::nullopt;
+    return latest_match;
 }
 
 void Cache::write_to_log(const HTTP_cache& cache) {
@@ -106,7 +166,6 @@ void Cache::add_to_queue(const HTTP_cache& cache) {
     }
 
     if (buffer.size() >= BUFFER_SIZE) {
-        // Prefer evicting an expired entry before evicting the least-used live entry.
         HTTP_cache* evict_target = TTL_Check_Internal();
         if (evict_target == nullptr) {
             evict_target = Find_min();

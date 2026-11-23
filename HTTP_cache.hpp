@@ -85,14 +85,15 @@ public:
 
     uint64_t access_count = 0; // Hit counter      
 
-    void add_header(std::vector<HeaderEntry> newHeader);
-    void remove_header(std::string key);
-    bool Handle_Singleton_Header_conflict(const std::vector<HeaderEntry> newHeader);
-    bool Handle_Mutually_Exclusive_Headers(const std::vector<HeaderEntry> newHeader);
+    void add_header(const std::vector<HeaderEntry>& newHeader);
+    void remove_header(const std::string& key);
+    bool Handle_Singleton_Header_conflict(const std::vector<HeaderEntry>& newHeader)const;
+    bool Handle_Mutually_Exclusive_Headers(const std::vector<HeaderEntry>& newHeader);
     void update_body(std::vector<char>newbody);
     rapidjson::Value ToJson(rapidjson::Document::AllocatorType& allocator) const;
     bool FromJson(const rapidjson::Value& obj); // Added missing semicolon here
-    void update_TTL();
+    void update_TTL(std::time_t ttl_seconds = 300);
+     bool is_cacheable(std::time_t& out_ttl_seconds, std::time_t default_ttl = 300) const;
 };
 
 #endif 
