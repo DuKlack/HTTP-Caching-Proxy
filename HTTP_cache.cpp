@@ -227,3 +227,25 @@ void HTTP_cache::update_TTL(std::time_t ttl_seconds) {
     this->Expiration_Time = now + ttl_seconds;
 }
 
+bool HTTP_cache::is_cacheable(std::time_t& out_ttl_seconds, std::time_t default_ttl) const {
+    out_ttl_seconds = default_ttl;
+    for (const auto& h : header) {
+        if (to_lower(h.key) != "cache-control") continue;
+        std::string val = to_lower(h.value);
+        if (val.find("no-store") != std::string::npos ||
+            val.find("no-cache") != std::string::npos ||
+            val.find("private") != std::string::npos) {
+            return false;
+        }
+        auto pos = val.find("max-age=");
+        if (pos != std::string::npos) {
+            try {
+                long max_age = std::stol(val.substr(pos + 8));
+                if (max_age <= 0) return false;
+                out_ttl_seconds = static_cast<std::time_t>(max_age);
+            } catch (...) {
+            }
+        }
+    }
+    return true;
+}

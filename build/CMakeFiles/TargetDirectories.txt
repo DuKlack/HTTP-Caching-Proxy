@@ -1,3 +1,0 @@
-/home/itsc/b/build/CMakeFiles/CacheApp.dir
-/home/itsc/b/build/CMakeFiles/edit_cache.dir
-/home/itsc/b/build/CMakeFiles/rebuild_cache.dir
