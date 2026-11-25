@@ -34,8 +34,20 @@ struct CacheKeyHash {
 
 class Cache {
 public:
-    std::unordered_map<CacheKey, HTTP_cache, CacheKeyHash> buffer;
+    Cache(){
+        std::ifstream file(LOG_DESTINATION);
+        if (file.good()){
+            return;
+        }
+        else{
+            file.close();
+            std::ofstream file (LOG_DESTINATION);
+            file.close();
+            return;
+        }
 
+    }
+    std::unordered_map<CacheKey, HTTP_cache, CacheKeyHash> buffer;
     std::optional<HTTP_cache> Find_in_Queue(uint32_t target_ip, const std::string& Host);
     std::optional<HTTP_cache> Find_in_Log(uint32_t target_ip, const std::string& Host);
     std::optional<HTTP_cache> TTL_Check();
