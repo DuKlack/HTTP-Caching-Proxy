@@ -29,18 +29,10 @@ A multi-threaded HTTP/1.1 caching proxy server in C++17 with an in-memory LFU/TT
 Build the proxy:
 
 ```bash
-g++ -std=c++17 ox.cpp Cache.cpp HTTP_cache.cpp -pthread -o proxy
+g++ -std=c++17 main.cpp Cache.cpp HTTP_cache.cpp -pthread -o proxy
 ./proxy
 ```
 
-*(If your entry file is named `main.cpp`, replace `ox.cpp` with `main.cpp`.)*
-
-Build and run the unit tests standalone:
-
-```bash
-g++ -std=c++17 -DHTTP_CACHE_RUN_TESTS HTTP_cache.cpp -o test_cache
-./test_cache
-```
 
 ## Testing the Proxy
 
